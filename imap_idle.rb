@@ -14,9 +14,6 @@ require 'net/imap'
 require 'net/http'
 require 'mail'
 require 'time'
-include AdminsMailer
-
-@debug = false
 
 # return timestamp in ISO8601 with precision in milliseconds
 def time_now
@@ -24,12 +21,12 @@ def time_now
 end
 
 # make a connection to imap account
-def imap_connect(server, username, password)
+def imap_connect(server, username, password, debug = false)
   imap = Net::IMAP.new(server, 993, true)
-  Net::IMAP.debug = @debug
+  Net::IMAP.debug = debug
 
   capabilities = imap.capability
-  puts "imap capabilities: #{capabilities.join(',')}" if @debug
+  puts "imap capabilities: #{capabilities.join(',')}" if debug
 
   unless capabilities.include? "IDLE"
     puts "'IDLE' IMAP capability not available in server"
@@ -47,31 +44,36 @@ def send_response_email(receiver_email)
 end
 
 # watch for any mail that arrives to the specified folder, receive it and then delete it
-def idle_loop(imap, server, username, password, folder)
+def idle_loop(server, username, password, folder, debug = false)
+  imap = imap_connect(server, username, password)
   loop do
     begin
       imap.select(folder)
 
+      @msg_id = nil
       imap.idle do |resp|
-        puts resp.inspect if @debug
-        # Got something. Send DONE. This breaks you out of the blocking call
-        imap.idle_done
+        puts resp.inspect if debug
+        if resp.kind_of?(Net::IMAP::UntaggedResponse) and resp.name == "EXISTS"
+          # Receive an email. Send DONE. This breaks you out of the blocking call
+          @msg_id = resp.try(:data)
+          imap.idle_done
+        end
       end
 
-      imap.uid_search(["UNDELETED"]).each do |uid|
-        msg   = imap.uid_fetch(uid, ['RFC822']).first.attr['RFC822']
+      if @msg_id
+        # Read and delete the received email
+        msg   = imap.uid_fetch(@msg_id, ['RFC822']).first.attr['RFC822']
         email = Mail.read_from_string msg
         sender_email = email.from.first
 
         # tag email to delete
-        imap.uid_store(uid, "+FLAGS", [:Deleted])
+        imap.uid_store(@msg_id, "+FLAGS", [:Deleted])
 
-        # process arrived email
         send_response_email(sender_email)
-      end
 
         # expunge removes the deleted emails
         imap.expunge
+      end 
 
     rescue SignalException => e
       puts "Signal received at #{time_now}: #{e.class}. #{e.message}"
@@ -107,7 +109,5 @@ end
 puts "\n      imap server: #{server}"
 puts "         username: #{username}"
 puts "           folder: #{folder}"
-
-imap = imap_connect(server, username, password)
 
 idle_loop(imap, server, username, password, folder)
